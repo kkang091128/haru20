@@ -312,7 +312,7 @@
           <circle id="ringProgress" cx="50" cy="50" r="42" fill="none" stroke="#e0a53c" stroke-width="10" stroke-linecap="round" stroke-dasharray="264" stroke-dashoffset="264" transform="rotate(-90 50 50)"/>
         </svg>
         <div>
-          <div class="ring-num"><span id="todayCount">0</span>/20</div>
+          <div class="ring-num"><span id="todayCount">0</span>/<span id="todayTarget">20</span></div>
           <div class="ring-label">오늘의 학습 진행</div>
         </div>
       </div>
@@ -384,7 +384,7 @@
       <p id="completeSub">수고했어요, 정답률 90%로 학습을 마쳤어요.</p>
       <div class="score-row">
         <div class="stat-box"><div class="n" id="cScore">18/20</div><div class="l">정답</div></div>
-        <div class="stat-box"><div class="n" id="cReview">2</div><div class="l">내일 복습</div></div>
+        <div class="stat-box"><div class="n" id="cReview">2</div><div class="l">다음 복습</div></div>
       </div>
       <div class="parent-box">
         <h3>📨 학부모님께 전달할 메시지</h3>
@@ -3438,7 +3438,8 @@
 
   var LEVEL_LABEL = {elem:"초등", ms:"중등", hs:"고등", custom:"오답노트"};
   var LEVEL_TARGET = {elem:800, ms:1100, hs:1100}; // "custom" (오답노트) has no fixed target -- it grows as you go
-  var DAY_SIZE = 20;
+  var NEW_WORDS_PER_SESSION = 20;
+  var REVIEW_WORDS_PER_SESSION = 5; // added from the 2nd session onward, pulled from the previous session
   var INTERVALS = [1,2,4,7,15,30]; // number of *sessions* until due again, indexed by box
 
   function shuffle(arr){
@@ -3608,11 +3609,43 @@
         fresh.push(w.id);
       }
     });
-    // mix due/review words with fresh words, then shuffle the whole set
-    var queue = due.slice(0, DAY_SIZE);
-    var remaining = DAY_SIZE - queue.length;
-    if(remaining > 0) queue = queue.concat(fresh.slice(0, remaining));
-    queue = shuffle(queue);
+
+    // the very first session has nothing to review yet; from the 2nd session
+    // on, mix in 5 words from the session that was just finished
+    var isFirstSession = completed === 0;
+    var reviewTarget = isFirstSession ? 0 : REVIEW_WORDS_PER_SESSION;
+    var reviewPicked = [];
+
+    if(reviewTarget > 0){
+      var prevSession = DB.sessions[level]; // the session about to be replaced
+      if(prevSession && prevSession.queue && prevSession.queue.length){
+        // prioritize words gotten wrong last time, then fill the rest randomly
+        // from the rest of yesterday's set
+        var prevWrong = prevSession.queue.filter(function(id){ return prevSession.tested[id] === false; });
+        var prevRest = prevSession.queue.filter(function(id){ return prevSession.tested[id] !== false; });
+        reviewPicked = shuffle(prevWrong).concat(shuffle(prevRest)).slice(0, reviewTarget);
+      }
+      if(reviewPicked.length < reviewTarget){
+        // not enough carried over from last time (e.g. a very short previous
+        // session) -- top up from the longer-term spaced-repetition due queue
+        var extra = shuffle(due.filter(function(id){ return reviewPicked.indexOf(id)===-1; }));
+        reviewPicked = reviewPicked.concat(extra.slice(0, reviewTarget-reviewPicked.length));
+      }
+    }
+
+    var newPicked = fresh.slice(0, NEW_WORDS_PER_SESSION);
+    var combined = reviewPicked.concat(newPicked);
+    var total = NEW_WORDS_PER_SESSION + reviewTarget;
+    if(combined.length < total){
+      // running low on brand-new words (near the end of the word bank) --
+      // top up with anything else available so the session is still full
+      var usedIds = combined;
+      var leftover = all.map(function(w){ return w.id; })
+        .filter(function(id){ return usedIds.indexOf(id)===-1; });
+      combined = combined.concat(shuffle(leftover).slice(0, total-combined.length));
+    }
+
+    var queue = shuffle(combined);
     DB.sessions[level] = {queue:queue, tested:{}, done:false};
     save();
     return DB.sessions[level];
@@ -3652,12 +3685,18 @@
     var session = peekSession();
     var studied = session ? Object.keys(session.tested).length : 0;
     var done = session ? session.done : false;
+    // the size of the session actually in progress, or (if none yet / just
+    // finished) an estimate of what the next one will be: 20 new words, plus
+    // 5 review words from the second session onward
+    var target = (session && !done) ? session.queue.length
+      : NEW_WORDS_PER_SESSION + ((DB.sessionsCompleted[DB.profile.level]||0) === 0 ? 0 : REVIEW_WORDS_PER_SESSION);
     document.getElementById("todayCount").textContent = studied;
+    document.getElementById("todayTarget").textContent = target;
     var circumference = 264;
-    var offset = circumference - (Math.min(studied,20)/20)*circumference;
+    var offset = circumference - (Math.min(studied,target)/target)*circumference;
     document.getElementById("ringProgress").style.strokeDashoffset = offset;
-    document.getElementById("homeSub").textContent = done ? "이번 학습을 모두 마쳤어요. 다음 세트도 준비됐어요!" : "오늘도 20개, 완벽하게 외워볼까요?";
-    document.getElementById("homeStudyBtn").textContent = done ? "다음 20개 시작하기" : (studied>0 ? "이어서 학습하기" : "학습 시작");
+    document.getElementById("homeSub").textContent = done ? "이번 학습을 모두 마쳤어요. 다음 세트도 준비됐어요!" : ("오늘도 "+target+"개, 완벽하게 외워볼까요?");
+    document.getElementById("homeStudyBtn").textContent = done ? "다음 "+target+"개 시작하기" : (studied>0 ? "이어서 학습하기" : "학습 시작");
     document.getElementById("streakNum").textContent = DB.streak||0;
     document.getElementById("masteredNum").textContent = masteredCount();
     document.getElementById("reviewNum").textContent = reviewCount();
