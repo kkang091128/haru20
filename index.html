@@ -125,6 +125,11 @@
     margin-top:18px; width:100%; padding:14px; border:none; border-radius:12px;
     background:rgba(255,255,255,0.16); color:#fff; font-weight:700; font-size:14.5px;
   }
+  .review-all-btn{
+    width:100%; padding:13px; margin-top:12px; border:1.5px dashed var(--line); border-radius:14px;
+    background:var(--paper-2); color:var(--slate); font-weight:700; font-size:13.5px;
+  }
+  .review-all-btn:disabled{opacity:.45;}
   .stat-row{display:flex; gap:10px; margin-top:14px;}
   .stat-box{
     flex:1; background:var(--paper-2); border:1px solid var(--line); border-radius:14px;
@@ -318,6 +323,7 @@
       </div>
       <button class="ring-cta" id="homeStudyBtn">오늘 학습 시작</button>
     </div>
+    <button class="review-all-btn" id="reviewAllBtn">🔁 전에 배운 단어 복습하기</button>
     <div class="stat-row">
       <div class="stat-box"><div class="n" id="streakNum">0</div><div class="l">연속 학습일</div></div>
       <div class="stat-box"><div class="n" id="masteredNum">0</div><div class="l">완전히 외운 단어</div></div>
@@ -384,7 +390,7 @@
       <p id="completeSub">수고했어요, 정답률 90%로 학습을 마쳤어요.</p>
       <div class="score-row">
         <div class="stat-box"><div class="n" id="cScore">18/20</div><div class="l">정답</div></div>
-        <div class="stat-box"><div class="n" id="cReview">2</div><div class="l">다음 복습</div></div>
+        <div class="stat-box"><div class="n" id="cReview">2</div><div class="l" id="cReviewLabel">다음 복습</div></div>
       </div>
       <div class="parent-box">
         <h3>📨 학부모님께 전달할 메시지</h3>
@@ -3706,8 +3712,16 @@
       document.getElementById("bank"+lv.charAt(0).toUpperCase()+lv.slice(1)).textContent = n+" / "+LEVEL_TARGET[lv]+"개 등록";
     });
     document.getElementById("bankCustom").textContent = wordsForLevel("custom").length+"개 모음";
+
+    var poolSize = reviewPool().length;
+    var reviewBtn = document.getElementById("reviewAllBtn");
+    reviewBtn.disabled = poolSize===0;
+    reviewBtn.textContent = poolSize===0
+      ? "🔁 전에 배운 단어 복습하기 (아직 없어요)"
+      : "🔁 전에 배운 단어 복습하기 (" + poolSize + "개 중 " + Math.min(poolSize,20) + "개)";
   }
   document.getElementById("homeStudyBtn").addEventListener("click", startStudy);
+  document.getElementById("reviewAllBtn").addEventListener("click", startReview);
   document.getElementById("editNameBtn").addEventListener("click", function(){
     document.getElementById("greetRow").style.display = "none";
     var row = document.getElementById("nameEditRow");
@@ -3752,7 +3766,10 @@
   /* ---------------- Study (flashcards) ---------------- */
   var studyPos = 0;
   var studyWords = [];
+  var reviewMode = false;   // true while running a "전체 복습" round instead of the daily session
+  var reviewTested = {};    // id -> correct, tracked separately so it never touches the daily session
   function startStudy(){
+    reviewMode = false;
     var session = getOrCreateSession();
     if(session.queue.length===0){
       toast("이 단계에 등록된 단어가 없어요. 단어장 탭에서 추가해 주세요.");
@@ -3760,6 +3777,28 @@
       return;
     }
     studyWords = session.queue.map(function(id){ return DB.words[id]; }).filter(Boolean);
+    studyPos = 0;
+    renderFlashcard();
+    showScreen("study");
+  }
+
+  // Everything previously studied at least once (has a stats entry), for the
+  // active level -- so a student can go back over older words even once they
+  // are no longer "due" for the usual spaced-repetition schedule. A fresh
+  // random 20 is picked each time, so repeated taps cover different words.
+  function reviewPool(){
+    return wordsForLevel(DB.profile.level).filter(function(w){ return !!DB.stats[w.id]; });
+  }
+
+  function startReview(){
+    var pool = reviewPool();
+    if(pool.length===0){
+      toast("아직 복습할 단어가 없어요. 먼저 오늘 학습을 진행해 주세요.");
+      return;
+    }
+    reviewMode = true;
+    reviewTested = {};
+    studyWords = shuffle(pool).slice(0, 20);
     studyPos = 0;
     renderFlashcard();
     showScreen("study");
@@ -3860,7 +3899,11 @@
       addToMistakeNotebook(w);
     }
     updateStat(w.id, correct);
-    DB.sessions[DB.profile.level].tested[w.id] = correct;
+    if(reviewMode){
+      reviewTested[w.id] = correct;
+    } else {
+      DB.sessions[DB.profile.level].tested[w.id] = correct;
+    }
     save();
     renderHome();
     setTimeout(function(){
@@ -3979,6 +4022,7 @@
   }
 
   function finishSession(){
+    if(reviewMode){ finishReview(); return; }
     var level = DB.profile.level;
     var session = DB.sessions[level];
     session.done = true;
@@ -3996,6 +4040,7 @@
       DB.lastStudyDate = t;
     }
     save();
+    document.getElementById("cReviewLabel").textContent = "다음 복습";
     document.getElementById("completeSub").textContent = "수고했어요, 정답률 "+Math.round(correctN/total*100)+"%로 학습을 마쳤어요.";
     document.getElementById("cScore").textContent = correctN+"/"+total;
     document.getElementById("cReview").textContent = reviewN;
@@ -4004,6 +4049,26 @@
       "정답 "+correctN+"개 / 복습 예정 "+reviewN+"개 (정답률 "+Math.round(correctN/total*100)+"%)\n"+
       "연속 학습 "+DB.streak+"일째예요. 칭찬 한마디 부탁드려요! 😊";
     document.getElementById("parentMsg").value = msg;
+    renderHome();
+    showScreen("complete");
+  }
+
+  function finishReview(){
+    var results = reviewTested;
+    var correctN = Object.values(results).filter(Boolean).length;
+    var total = Object.keys(results).length;
+    var reviewN = total - correctN;
+    save();
+    document.getElementById("cReviewLabel").textContent = "다시 헷갈림";
+    document.getElementById("completeSub").textContent = "복습 수고하셨어요, 정답률 "+Math.round(correctN/total*100)+"%였어요.";
+    document.getElementById("cScore").textContent = correctN+"/"+total;
+    document.getElementById("cReview").textContent = reviewN;
+    var msg = "["+LEVEL_LABEL[DB.profile.level]+" 복습 완료]\n"+
+      DB.profile.name+" 학생이 이전에 배운 단어 "+total+"개를 복습했어요.\n"+
+      "정답 "+correctN+"개 / 다시 헷갈린 단어 "+reviewN+"개 (정답률 "+Math.round(correctN/total*100)+"%)\n"+
+      "반복 복습이 기억에 최고예요! 😊";
+    document.getElementById("parentMsg").value = msg;
+    reviewMode = false;
     renderHome();
     showScreen("complete");
   }
